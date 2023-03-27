@@ -9,9 +9,14 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+const queryTimeout = time.Hour
 
 func main() {
 	var startingMigration int
@@ -39,14 +44,22 @@ func main() {
 		return
 	}
 
-	conn, err := pgx.Connect(context.Background(), dsn)
+	poolCfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		logger.Println(err)
 		return
 	}
-	defer conn.Close(context.Background())
 
-	_, err = conn.Exec(context.Background(), "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;")
+	poolCfg.MaxConns = 2 // one for running queries, another for checking locks.
+
+	pool, err := pgxpool.NewWithConfig(context.Background(), poolCfg)
+	if err != nil {
+		logger.Println(err)
+		return
+	}
+	defer pool.Close()
+
+	_, err = pool.Exec(context.Background(), "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;")
 	if err != nil {
 		logger.Println(err)
 		return
@@ -73,13 +86,14 @@ func main() {
 			continue
 		}
 
-		_, err = conn.Exec(context.Background(), "SELECT pg_stat_statements_reset();")
+		_, err = pool.Exec(context.Background(), "SELECT pg_stat_statements_reset();")
 		if err != nil {
 			logger.Println(err)
 			return
 		}
 
-		fmt.Printf("Starting migration: %100s\n", entry.Name()+strings.Repeat("-", 45))
+		fmt.Println(strings.Repeat("-", 100))
+		fmt.Printf("Starting migration: %s\n", entry.Name())
 
 		buf, err := os.ReadFile(path.Join(sourceDir, entry.Name()))
 		if err != nil {
@@ -87,28 +101,81 @@ func main() {
 			return
 		}
 
-		_, err = conn.Exec(context.Background(), fmt.Sprintf("%s", buf))
+		quit := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+
+			// Because we are running the query in a loop, we might get the same locked
+			// tables over and over again. This is to get the result of only unique tables.
+			lockMap := make(map[string]bool)
+
+			defer func() {
+				fmt.Println("LOCKS:")
+				for k := range lockMap {
+					split := strings.Split(k, "-")
+					fmt.Printf("LOCK TYPE: %s, RELATION: %s, MODE: %s, GRANTED: %s\n", split[0], split[1], split[2], split[3])
+				}
+			}()
+
+			for {
+				select {
+				case <-quit:
+					return
+				case <-ticker.C:
+					rows, err := pool.Query(context.Background(), `SELECT locktype, relation::regclass, mode, granted
+				FROM pg_catalog.pg_locks l
+				LEFT JOIN pg_catalog.pg_database db ON db.oid = l.database
+				JOIN pg_class c ON l.relation=c.oid
+				WHERE (db.datname = current_database() OR db.datname IS NULL) AND c.relkind='r' AND NOT pid = pg_backend_pid() AND locktype='relation';`)
+					if err != nil {
+						logger.Println(err)
+						return
+					}
+					var lockType, relation, mode string
+					var granted bool
+					pgx.ForEachRow(rows, []any{&lockType, &relation, &mode, &granted}, func() error {
+						lockMap[lockType+"-"+relation+"-"+mode+"-"+fmt.Sprint(granted)] = true
+						return nil
+					})
+				}
+			}
+		}()
+
+		_, err = pool.Exec(context.Background(), fmt.Sprintf("%s", buf))
 		if err != nil {
 			logger.Println(err)
 			continue
 		}
 
-		rows, err := conn.Query(context.Background(), "SELECT query, total_exec_time, rows FROM pg_stat_statements;")
+		// cancel locks query
+		close(quit)
+		wg.Wait()
+
+		ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
+		// Not using defer cancel() because this is running in a loop,
+		// and defer won't be called until the cmd exits.
+		rows, err := pool.Query(ctx, "SELECT query, total_exec_time, rows FROM pg_stat_statements;")
 		if err != nil {
 			logger.Println(err)
+			cancel()
 			continue
 		}
 		var query string
 		var execTime float64
 		var numRows int
 		pgx.ForEachRow(rows, []any{&query, &execTime, &numRows}, func() error {
-			// Ignore the reset query
-			if query == "SELECT pg_stat_statements_reset()" {
+			// Ignore the reset and locks query
+			if query == "SELECT pg_stat_statements_reset()" || strings.HasPrefix(query, "SELECT locktype, relation::regclass") {
 				return nil
 			}
 			fmt.Println("QUERY: ", query)
 			fmt.Printf("EXEC TIME: %f ms, ROWS AFFECTED: %d\n", execTime, numRows)
 			return nil
 		})
+		cancel()
 	}
 }
