@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mattermost/morph/models"
 )
 
 const queryTimeout = time.Hour
@@ -25,6 +26,14 @@ func main() {
 	flag.StringVar(&sourceDir, "source_dir", "", "Source directory containing the migrations. Example: ~/mattermost-server/server/channels/db/migrations/postgres")
 	flag.StringVar(&dsn, "dsn", "postgres://mmuser:mostest@localhost/mattermost_test?sslmode=disable", "Database DSN to connect to")
 	flag.Parse()
+
+	var confirm string
+	fmt.Print("This tool will apply DB migrations to the database which can be destructive in nature. Please ensure you have a backup before proceeding. Continue? (y/n): ")
+	fmt.Scanln(&confirm)
+
+	if strings.ToLower(confirm) != "y" {
+		return
+	}
 
 	logger := log.New(os.Stderr, "[migro]: ", log.LstdFlags|log.Lshortfile)
 
@@ -70,13 +79,13 @@ func main() {
 			continue
 		}
 
-		split := strings.Split(entry.Name(), "_")
-		if len(split) < 2 {
-			logger.Printf("_ separator not found for this migration %s. Skipping ..\n", entry.Name())
+		matches := models.Regex.FindStringSubmatch(entry.Name())
+		if len(matches) <= 1 {
+			logger.Printf("Migration %s does not match regex %s\n", entry.Name(), models.Regex.String())
 			continue
 		}
 
-		seqNum, err := strconv.Atoi(split[0])
+		seqNum, err := strconv.Atoi(matches[1])
 		if err != nil {
 			logger.Println(err)
 			continue
@@ -145,7 +154,7 @@ func main() {
 			}
 		}()
 
-		_, err = pool.Exec(context.TODO(), fmt.Sprintf("%s", buf))
+		_, err = pool.Exec(context.TODO(), string(buf))
 		if err != nil {
 			logger.Println(err)
 			continue
