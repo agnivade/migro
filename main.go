@@ -59,7 +59,7 @@ func main() {
 	}
 	defer pool.Close()
 
-	_, err = pool.Exec(context.Background(), "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;")
+	_, err = pool.Exec(context.TODO(), "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;")
 	if err != nil {
 		logger.Println(err)
 		return
@@ -86,7 +86,7 @@ func main() {
 			continue
 		}
 
-		_, err = pool.Exec(context.Background(), "SELECT pg_stat_statements_reset();")
+		_, err = pool.Exec(context.TODO(), "SELECT pg_stat_statements_reset();")
 		if err != nil {
 			logger.Println(err)
 			return
@@ -126,7 +126,7 @@ func main() {
 				case <-quit:
 					return
 				case <-ticker.C:
-					rows, err := pool.Query(context.Background(), `SELECT locktype, relation::regclass, mode, granted
+					rows, err := pool.Query(context.TODO(), `SELECT locktype, relation::regclass, mode, granted
 				FROM pg_catalog.pg_locks l
 				LEFT JOIN pg_catalog.pg_database db ON db.oid = l.database
 				JOIN pg_class c ON l.relation=c.oid
@@ -138,14 +138,14 @@ func main() {
 					var lockType, relation, mode string
 					var granted bool
 					pgx.ForEachRow(rows, []any{&lockType, &relation, &mode, &granted}, func() error {
-						lockMap[lockType+"-"+relation+"-"+mode+"-"+fmt.Sprint(granted)] = true
+						lockMap[fmt.Sprintf("%s-%s-%s-%t", lockType, relation, mode, granted)] = true
 						return nil
 					})
 				}
 			}
 		}()
 
-		_, err = pool.Exec(context.Background(), fmt.Sprintf("%s", buf))
+		_, err = pool.Exec(context.TODO(), fmt.Sprintf("%s", buf))
 		if err != nil {
 			logger.Println(err)
 			continue
