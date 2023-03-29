@@ -2,7 +2,10 @@ module github.com/agnivade/migro
 
 go 1.19
 
-require github.com/jackc/pgx/v5 v5.3.1
+require (
+	github.com/jackc/pgx/v5 v5.3.1
+	github.com/mattermost/morph v1.0.4
+)
 
 require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect
