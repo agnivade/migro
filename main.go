@@ -141,22 +141,32 @@ func main() {
 			return
 		}
 
+		strBuf := string(buf)
+		err = analyzeQuery(strBuf)
+		// We don't want to skip running the query if it failed analysis.
+		if err != nil {
+			logger.Println(err)
+		}
+
 		quit := make(chan struct{})
 		var wg sync.WaitGroup
 		wg.Add(1)
 		go checkLocks(&wg, quit, logger, pool)
 
-		_, err = pool.Exec(context.TODO(), string(buf))
+		execCtx, execCancel := context.WithTimeout(context.Background(), queryTimeout)
+		_, err = pool.Exec(execCtx, strBuf)
 		if err != nil {
 			logger.Println(err)
+			execCancel()
 			continue
 		}
+		execCancel()
 
 		// cancel locks query
 		close(quit)
 		wg.Wait()
 
-		ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), statQueryTimeout)
 		// Not using defer cancel() because this is running in a loop,
 		// and defer won't be called until the cmd exits.
 		rows, err := pool.Query(ctx, "SELECT query, total_exec_time, rows FROM pg_stat_statements;")
